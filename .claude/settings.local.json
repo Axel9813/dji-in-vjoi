@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(\"c:/Apps/sdk/flutter/bin/flutter\" --version)",
+      "Bash(\"c:/Apps/sdk/flutter/bin/flutter\" build apk:*)",
+      "Bash(adb devices:*)",
+      "Bash(adb install:*)",
+      "Bash(adb shell:*)",
+      "Bash(adb logcat:*)",
+      "Bash(for:*)",
+      "Bash(do echo \"=== Interface $i ===\")",
+      "Bash(done)"
+    ]
+  }
+}
