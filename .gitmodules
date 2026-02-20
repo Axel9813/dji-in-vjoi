@@ -1,6 +1,3 @@
-[submodule "rc-monitor-master/rc-monitor-master2"]
-	path = rc-monitor-master/rc-monitor-master2
-	url = https://github.com/snglth/rc-monitor.git
-[submodule "space.yasha.rcmonitor"]
-	path = space.yasha.rcmonitor
+[submodule "rc-monitor"]
+	path = rc-monitor
 	url = https://github.com/snglth/rc-monitor.git

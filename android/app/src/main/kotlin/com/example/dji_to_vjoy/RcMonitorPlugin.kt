@@ -8,8 +8,10 @@ import android.content.IntentFilter
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.util.Log
-import com.dji.rcmonitor.RcMonitor
-import com.dji.rcmonitor.UsbRcReader
+import space.yasha.rcmonitor.DussStreamReader
+import space.yasha.rcmonitor.RcMonitor
+import space.yasha.rcmonitor.RcReaderChain
+import space.yasha.rcmonitor.UsbRcReader
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -35,7 +37,7 @@ class RcMonitorPlugin(
         private const val ACTION_USB_PERMISSION = "com.example.dji_to_vjoy.USB_PERMISSION"
     }
 
-    private var usbReader: UsbRcReader? = null
+    private var readerChain: RcReaderChain? = null
     private var eventSink: EventChannel.EventSink? = null
     private var isRunning = false
     private var pendingResult: MethodChannel.Result? = null
@@ -238,30 +240,33 @@ class RcMonitorPlugin(
     }
 
     private fun doStartReader(): Boolean {
-        // Clean up any previous reader first
-        usbReader?.let {
-            Log.d(TAG, "Cleaning up previous reader before starting new one")
+        // Clean up any previous chain first
+        readerChain?.let {
+            Log.d(TAG, "Cleaning up previous reader chain before starting new one")
             it.stop()
         }
-        usbReader = null
+        readerChain = null
         isRunning = false
 
-        val reader = UsbRcReader(context)
-        val success = reader.start(rcListener)
-        if (success) {
-            usbReader = reader
+        val chain = RcReaderChain(
+            DussStreamReader(context),
+            UsbRcReader(context)
+        )
+        val active = chain.start(rcListener)
+        if (active != null) {
+            readerChain = chain
             isRunning = true
-            Log.d(TAG, "RC monitoring started successfully")
+            Log.d(TAG, "RC monitoring started via ${active.name}")
         } else {
-            Log.e(TAG, "Failed to start USB reader")
+            Log.e(TAG, "No reader could start")
         }
-        return success
+        return active != null
     }
 
     private fun stopMonitoring() {
         Log.d(TAG, "Stopping RC monitoring...")
-        usbReader?.stop()
-        usbReader = null
+        readerChain?.stop()
+        readerChain = null
         isRunning = false
         lastLogLine = ""
         Log.d(TAG, "RC monitoring stopped")

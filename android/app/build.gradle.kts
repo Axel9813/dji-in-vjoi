@@ -34,7 +34,7 @@ android {
     // Build the rc-monitor native C library via CMake (upgraded version)
     externalNativeBuild {
         cmake {
-            path = file("../../rc-monitor-master/rc-monitor-master/CMakeLists.txt")
+            path = file("../../rc-monitor/CMakeLists.txt")
             version = "3.18.1+"
         }
     }
@@ -48,7 +48,7 @@ android {
     // Include the rc-monitor Java sources (upgraded version)
     sourceSets {
         getByName("main") {
-            java.srcDirs("../../rc-monitor-master/rc-monitor-master/java")
+            java.srcDirs("../../rc-monitor/java")
         }
     }
 }
