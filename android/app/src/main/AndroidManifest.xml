@@ -10,6 +10,9 @@
     <!-- Request input group (gid 1004) to read /dev/input joystick device -->
     <uses-permission android:name="android.permission.DIAGNOSTIC" />
 
+    <!-- Shizuku: shell-level access for reading /dev/input when no root available -->
+    <uses-permission android:name="rikka.shizuku.permission.API_V23" />
+
     <application
         android:label="DJI RC to vJoy"
         android:name="${applicationName}"
@@ -44,6 +47,15 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+
+        <!-- Shizuku provider: receives binder from Shizuku service at app start -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:multiprocess="false"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
     </application>
 
     <queries>

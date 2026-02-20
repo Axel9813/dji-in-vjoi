@@ -5,9 +5,11 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.util.Log
+import rikka.shizuku.Shizuku
 import space.yasha.rcmonitor.DussStreamReader
 import space.yasha.rcmonitor.InputEventReader
 import space.yasha.rcmonitor.RcMonitor
@@ -21,9 +23,16 @@ import io.flutter.plugin.common.MethodChannel
  * Native Android bridge between the rc-monitor library and Flutter.
  *
  * Uses RcReaderChain to try readers in priority order:
- *   1. DussStreamReader — USB Interface 7, no root, no handshake
- *   2. UsbRcReader — full CDC ACM + DUML handshake
- *   3. InputEventReader — /dev/input sticks only (no buttons)
+ *   1. GamepadRcReader  — /dev/input via Shizuku (no root needed)
+ *   2. BinderRcReader   — DJI Binder IPC (needs platform signing)
+ *   3. DussStreamReader  — USB Interface 7 DUSS stream
+ *   4. UsbRcReader       — full CDC ACM + DUML handshake
+ *   5. InputEventReader  — /dev/input sticks only (needs root)
+ *
+ * Permission flow:
+ *   1. If Shizuku is running → request Shizuku permission first
+ *   2. Start reader chain (GamepadRcReader uses Shizuku if permitted)
+ *   3. If chain fails and DJI USB device found → request USB permission and retry
  *
  * Provides:
  * - MethodChannel "com.dji.rc/control" for start/stop commands
@@ -37,6 +46,7 @@ class RcMonitorPlugin(
         private const val TAG = "RcMonitorPlugin"
         private const val LOG_TAG = "RC_OUTPUT"
         private const val ACTION_USB_PERMISSION = "com.example.dji_to_vjoy.USB_PERMISSION"
+        private const val SHIZUKU_PERMISSION_REQUEST_CODE = 100
     }
 
     private var readerChain: RcReaderChain? = null
@@ -44,6 +54,10 @@ class RcMonitorPlugin(
     private var isRunning = false
     private var pendingResult: MethodChannel.Result? = null
     private var lastLogLine: String = ""
+
+    /** Exposed so the Activity can forward gamepad events. */
+    var gamepadReader: GamepadRcReader? = null
+        private set
 
     private val usbPermissionReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, intent: Intent) {
@@ -73,11 +87,27 @@ class RcMonitorPlugin(
         }
     }
 
+    /** Shizuku permission callback — proceeds with starting the reader chain. */
+    private val shizukuPermissionListener =
+        Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
+            if (requestCode == SHIZUKU_PERMISSION_REQUEST_CODE) {
+                val granted = grantResult == PackageManager.PERMISSION_GRANTED
+                Log.d(TAG, "Shizuku permission result: granted=$granted")
+                val result = pendingResult ?: return@OnRequestPermissionResultListener
+                pendingResult = null
+                // Proceed with chain regardless — if denied, GamepadRcReader
+                // falls back to Activity forwarding mode (buttons only)
+                proceedWithStartChain(result)
+            }
+        }
+
     init {
         val filter = IntentFilter(ACTION_USB_PERMISSION)
         context.registerReceiver(usbPermissionReceiver, filter)
         // Bypass hidden API restrictions for accessing DJI's framework classes
         bypassHiddenApiRestrictions()
+        // Register Shizuku permission result listener
+        Shizuku.addRequestPermissionResultListener(shizukuPermissionListener)
     }
 
     private fun bypassHiddenApiRestrictions() {
@@ -211,30 +241,82 @@ class RcMonitorPlugin(
     private fun startMonitoring(result: MethodChannel.Result) {
         Log.d(TAG, "Starting RC monitoring...")
 
-        // Find a DJI USB device to check permission
-        val usbManager = context.getSystemService(Context.USB_SERVICE) as? UsbManager
-        if (usbManager == null) {
-            result.error("NO_USB_MANAGER", "USB manager unavailable", null)
-            return
-        }
-
-        val djiDevice = findDjiDevice(usbManager)
-        if (djiDevice == null) {
-            Log.w(TAG, "No DJI USB device found, will try non-USB readers")
-            // Still try — InputEventReader doesn't need USB
-            val started = doStartReaderChain()
-            if (started) {
-                result.success(mapOf("status" to "started"))
+        // Step 1: If Shizuku is running, ensure we have permission before starting.
+        // This lets GamepadRcReader use Shizuku for full /dev/input access.
+        try {
+            if (Shizuku.pingBinder()) {
+                if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
+                    Log.d(TAG, "Shizuku available but permission not granted — requesting...")
+                    pendingResult = result
+                    Shizuku.requestPermission(SHIZUKU_PERMISSION_REQUEST_CODE)
+                    return
+                }
+                Log.d(TAG, "Shizuku available and permission granted")
             } else {
-                result.error("NO_DEVICE", "No DJI USB device and no other readers available", null)
+                Log.d(TAG, "Shizuku not running — will try other readers")
             }
+        } catch (e: Exception) {
+            Log.w(TAG, "Shizuku check failed: ${e.message}")
+        }
+
+        // Step 2: Start the reader chain
+        proceedWithStartChain(result)
+    }
+
+    /**
+     * Starts the reader chain. If GamepadRcReader starts but without raw USB
+     * (limited button support), requests USB permission for the joystick and
+     * restarts. Also falls back to requesting USB permission for the pigeon
+     * device if the chain fails entirely.
+     */
+    private fun proceedWithStartChain(result: MethodChannel.Result) {
+        val started = doStartReaderChain()
+        if (started) {
+            // Check if GamepadRcReader is active but NOT in raw USB mode
+            // — if so, request USB permission for the joystick to enable full button capture
+            val gpr = gamepadReader
+            if (gpr != null && !gpr.isRawUsbMode) {
+                val joystickDevice = GamepadRcReader.findDjiJoystickUsb(context)
+                val usbManager = context.getSystemService(Context.USB_SERVICE) as? UsbManager
+                if (joystickDevice != null && usbManager != null && !usbManager.hasPermission(joystickDevice)) {
+                    Log.d(TAG, "GamepadRcReader active but no raw USB — requesting joystick USB permission...")
+                    pendingResult = result
+                    val permissionIntent = PendingIntent.getBroadcast(
+                        context, 0,
+                        Intent(ACTION_USB_PERMISSION),
+                        PendingIntent.FLAG_IMMUTABLE
+                    )
+                    usbManager.requestPermission(joystickDevice, permissionIntent)
+                    return
+                }
+            }
+            result.success(mapOf("status" to "started"))
+            // Probe DJI sockets in background to discover additional button data
+            DjiSocketProbe.probeAll()
             return
         }
 
-        Log.d(TAG, "Found DJI device: ${djiDevice.deviceName} PID=0x${djiDevice.productId.toString(16)}")
+        // Chain failed — check if USB permission might help
+        val usbManager = context.getSystemService(Context.USB_SERVICE) as? UsbManager
 
-        if (!usbManager.hasPermission(djiDevice)) {
-            Log.d(TAG, "Requesting USB permission — please tap Allow on the device")
+        // Try joystick device first (for raw USB reading)
+        val joystickDevice = GamepadRcReader.findDjiJoystickUsb(context)
+        if (joystickDevice != null && usbManager != null && !usbManager.hasPermission(joystickDevice)) {
+            Log.d(TAG, "Reader chain failed — requesting joystick USB permission...")
+            pendingResult = result
+            val permissionIntent = PendingIntent.getBroadcast(
+                context, 0,
+                Intent(ACTION_USB_PERMISSION),
+                PendingIntent.FLAG_IMMUTABLE
+            )
+            usbManager.requestPermission(joystickDevice, permissionIntent)
+            return
+        }
+
+        // Try pigeon device (for DussStream/UsbRcReader fallback)
+        val djiDevice = usbManager?.let { findDjiDevice(it) }
+        if (djiDevice != null && usbManager != null && !usbManager.hasPermission(djiDevice)) {
+            Log.d(TAG, "Reader chain failed — requesting USB permission for fallback readers...")
             pendingResult = result
             val permissionIntent = PendingIntent.getBroadcast(
                 context, 0,
@@ -245,21 +327,20 @@ class RcMonitorPlugin(
             return
         }
 
-        val started = doStartReaderChain()
-        if (started) {
-            result.success(mapOf("status" to "started"))
-        } else {
-            result.error("START_FAILED", "Failed to start RC reader", null)
-        }
+        result.error("START_FAILED", "No reader could start", null)
     }
 
     private fun doStartReaderChain(): Boolean {
         readerChain?.stop()
         readerChain = null
+        gamepadReader = null
         isRunning = false
 
+        val gpr = GamepadRcReader(context)
+        gamepadReader = gpr
+
         val chain = RcReaderChain(
-            GamepadRcReader(context),    // Priority 1: /dev/input direct read (no root on RM510B)
+            gpr,                         // Priority 1: Android gamepad API (no root, no permission)
             BinderRcReader(context),     // Priority 2: DJI protocol Binder IPC (needs platform sign)
             DussStreamReader(context),   // Priority 3: DUSS stream (no root, no handshake)
             UsbRcReader(context),        // Priority 4: Full USB CDC ACM + DUML
@@ -285,22 +366,13 @@ class RcMonitorPlugin(
         Log.d(TAG, "Stopping RC monitoring...")
         readerChain?.stop()
         readerChain = null
+        gamepadReader = null
         isRunning = false
         lastLogLine = ""
         Log.d(TAG, "RC monitoring stopped")
     }
 
     private fun findDjiDevice(usbManager: UsbManager): UsbDevice? {
-        var fallback: UsbDevice? = null
-        for (device in usbManager.deviceList.values) {
-            if (device.vendorId == RcMonitor.DJI_USB_VID) {
-                val pid = device.productId
-                if (pid == RcMonitor.DJI_USB_PID_INTERNAL) return device
-                if (pid == RcMonitor.DJI_USB_PID_ACTIVE || pid == RcMonitor.DJI_USB_PID_INIT) {
-                    fallback = device
-                }
-            }
-        }
-        return fallback
+        return RcMonitor.findDjiDevice(usbManager)
     }
 }

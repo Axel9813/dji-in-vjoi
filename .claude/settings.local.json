@@ -25,7 +25,12 @@
       "Bash(MSYS_NO_PATHCONV=1 adb pull:*)",
       "Bash(dexdump -d:*)",
       "Bash(dexdump:*)",
-      "Bash(do echo:*)"
+      "Bash(do echo:*)",
+      "Bash(gh api:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:www.xda-developers.com)",
+      "WebFetch(domain:central.sonatype.com)",
+      "WebFetch(domain:book.hacktricks.wiki)"
     ]
   }
 }
