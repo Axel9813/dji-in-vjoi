@@ -31,10 +31,10 @@ android {
         }
     }
 
-    // Build the rc-monitor native C library via CMake (upgraded version)
+    // Build the rc-monitor native C library via CMake (space.yasha.rcmonitor submodule)
     externalNativeBuild {
         cmake {
-            path = file("../../rc-monitor-master/rc-monitor-master/CMakeLists.txt")
+            path = file("../../space.yasha.rcmonitor/CMakeLists.txt")
             version = "3.18.1+"
         }
     }
@@ -45,10 +45,10 @@ android {
         }
     }
 
-    // Include the rc-monitor Java sources (upgraded version)
+    // Include the rc-monitor Java sources (space.yasha.rcmonitor submodule)
     sourceSets {
         getByName("main") {
-            java.srcDirs("../../rc-monitor-master/rc-monitor-master/java")
+            java.srcDirs("../../space.yasha.rcmonitor/java")
         }
     }
 }

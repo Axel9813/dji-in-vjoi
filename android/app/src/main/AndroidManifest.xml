@@ -3,6 +3,13 @@
     <!-- USB Host permission for talking to DJI RC hardware -->
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
 
+    <!-- Define and request DJI protocol permission for Binder IPC access to RC data -->
+    <permission android:name="dji.permission.PROTOCOL" android:protectionLevel="normal" />
+    <uses-permission android:name="dji.permission.PROTOCOL" />
+
+    <!-- Request input group (gid 1004) to read /dev/input joystick device -->
+    <uses-permission android:name="android.permission.DIAGNOSTIC" />
+
     <application
         android:label="DJI RC to vJoy"
         android:name="${applicationName}"

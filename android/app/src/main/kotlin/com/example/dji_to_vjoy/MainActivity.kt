@@ -15,13 +15,11 @@ class MainActivity : FlutterActivity() {
         val plugin = RcMonitorPlugin(this)
         rcPlugin = plugin
 
-        // Register MethodChannel for start/stop commands
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             "com.dji.rc/control"
         ).setMethodCallHandler(plugin)
 
-        // Register EventChannel for streaming RC state to Dart
         EventChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             "com.dji.rc/state"

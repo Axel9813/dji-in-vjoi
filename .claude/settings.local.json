@@ -9,7 +9,23 @@
       "Bash(adb logcat:*)",
       "Bash(for:*)",
       "Bash(do echo \"=== Interface $i ===\")",
-      "Bash(done)"
+      "Bash(done)",
+      "Bash(flutter build apk:*)",
+      "Bash(flutter install:*)",
+      "Bash(while read line:*)",
+      "Bash(do)",
+      "Bash(echo:*)",
+      "Bash(adb pull:*)",
+      "Bash(python3:*)",
+      "Bash(python -c:*)",
+      "Bash(# Need to decode the dex file - check if we have dexdump or d8 which dexdump || which d2j-dex2jar || which jadx || echo \"\"No dex tools found, trying Android SDK build-tools\"\" ls /c/Apps/platform-tools-latest-windows/build-tools/*/dexdump || echo \"\"No dexdump in SDK either\"\" # Try using the Android SDK''s dexdump find /c/Apps/platform-tools-latest-windows -name \"\"dexdump*\"\")",
+      "Bash(/c/Apps/platform-tools-latest-windows/build-tools/35.0.0/dexdump.exe:*)",
+      "Bash(while read f:*)",
+      "Bash(MSYS_NO_PATHCONV=1 adb shell:*)",
+      "Bash(MSYS_NO_PATHCONV=1 adb pull:*)",
+      "Bash(dexdump -d:*)",
+      "Bash(dexdump:*)",
+      "Bash(do echo:*)"
     ]
   }
 }

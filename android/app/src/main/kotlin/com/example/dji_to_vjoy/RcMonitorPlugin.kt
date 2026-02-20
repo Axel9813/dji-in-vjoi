@@ -8,22 +8,26 @@ import android.content.IntentFilter
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.util.Log
-import com.dji.rcmonitor.RcMonitor
-import com.dji.rcmonitor.UsbRcReader
+import space.yasha.rcmonitor.DussStreamReader
+import space.yasha.rcmonitor.InputEventReader
+import space.yasha.rcmonitor.RcMonitor
+import space.yasha.rcmonitor.RcReaderChain
+import space.yasha.rcmonitor.UsbRcReader
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 
 /**
- * Native Android bridge between the rc-monitor C library and Flutter.
+ * Native Android bridge between the rc-monitor library and Flutter.
+ *
+ * Uses RcReaderChain to try readers in priority order:
+ *   1. DussStreamReader — USB Interface 7, no root, no handshake
+ *   2. UsbRcReader — full CDC ACM + DUML handshake
+ *   3. InputEventReader — /dev/input sticks only (no buttons)
  *
  * Provides:
  * - MethodChannel "com.dji.rc/control" for start/stop commands
  * - EventChannel  "com.dji.rc/state"   for streaming RC state to Dart
- *
- * All RC state changes are also logged to logcat with tag "RC_OUTPUT"
- * so they can be captured by the Python script via:
- *   adb logcat -s RC_OUTPUT:D
  */
 class RcMonitorPlugin(
     private val context: Context
@@ -31,19 +35,16 @@ class RcMonitorPlugin(
 
     companion object {
         private const val TAG = "RcMonitorPlugin"
-        private const val LOG_TAG = "RC_OUTPUT"  // Tag for Python/ADB capture
+        private const val LOG_TAG = "RC_OUTPUT"
         private const val ACTION_USB_PERMISSION = "com.example.dji_to_vjoy.USB_PERMISSION"
     }
 
-    private var usbReader: UsbRcReader? = null
+    private var readerChain: RcReaderChain? = null
     private var eventSink: EventChannel.EventSink? = null
     private var isRunning = false
     private var pendingResult: MethodChannel.Result? = null
-
-    // Last state for change detection (avoid flooding logcat)
     private var lastLogLine: String = ""
 
-    /** BroadcastReceiver for USB permission result */
     private val usbPermissionReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, intent: Intent) {
             if (ACTION_USB_PERMISSION == intent.action) {
@@ -52,13 +53,12 @@ class RcMonitorPlugin(
                 Log.d(TAG, "USB permission result: granted=$granted device=${device?.deviceName}")
 
                 if (granted && device != null) {
-                    // Permission granted — now start the reader
-                    val started = doStartReader()
+                    val started = doStartReaderChain()
                     pendingResult?.let { result ->
                         if (started) {
                             result.success(mapOf("status" to "started"))
                         } else {
-                            result.error("START_FAILED", "Failed to start USB RC reader after permission grant", null)
+                            result.error("START_FAILED", "Failed to start RC reader after permission grant", null)
                         }
                         pendingResult = null
                     }
@@ -76,17 +76,39 @@ class RcMonitorPlugin(
     init {
         val filter = IntentFilter(ACTION_USB_PERMISSION)
         context.registerReceiver(usbPermissionReceiver, filter)
+        // Bypass hidden API restrictions for accessing DJI's framework classes
+        bypassHiddenApiRestrictions()
     }
 
-    /**
-     * The RC state listener that bridges native callbacks to Flutter EventChannel
-     * and also outputs to logcat for ADB/Python capture.
-     */
+    private fun bypassHiddenApiRestrictions() {
+        try {
+            // "Meta-reflection" trick: obtain getDeclaredMethod *through* reflection
+            // so the hidden-API check sees java.lang.reflect.Method as the caller
+            // (boot classpath) rather than our app code.  Works on Android 10.
+            val getDeclaredMethod = Class::class.java.getDeclaredMethod(
+                "getDeclaredMethod", String::class.java, arrayOf<Class<*>>()::class.java
+            )
+            val vmRuntimeClass = Class.forName("dalvik.system.VMRuntime")
+
+            val getRuntime = getDeclaredMethod.invoke(
+                vmRuntimeClass, "getRuntime", emptyArray<Class<*>>()
+            ) as java.lang.reflect.Method
+
+            val setExemptions = getDeclaredMethod.invoke(
+                vmRuntimeClass, "setHiddenApiExemptions", arrayOf(Array<String>::class.java)
+            ) as java.lang.reflect.Method
+
+            val runtime = getRuntime.invoke(null)
+            setExemptions.invoke(runtime, arrayOf("L") as Any)
+            Log.d(TAG, "Hidden API restrictions bypassed (meta-reflection)")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to bypass hidden API restrictions: ${e.message}")
+        }
+    }
+
     private val rcListener = object : RcMonitor.SimpleListener() {
         override fun onState(s: RcMonitor.RcState) {
-            // Build a map for Flutter
             val stateMap = HashMap<String, Any>().apply {
-                // Buttons
                 put("pause", s.pause)
                 put("gohome", s.gohome)
                 put("shutter", s.shutter)
@@ -94,39 +116,28 @@ class RcMonitorPlugin(
                 put("custom1", s.custom1)
                 put("custom2", s.custom2)
                 put("custom3", s.custom3)
-
-                // 5D joystick
                 put("fiveDUp", s.fiveDUp)
                 put("fiveDDown", s.fiveDDown)
                 put("fiveDLeft", s.fiveDLeft)
                 put("fiveDRight", s.fiveDRight)
                 put("fiveDCenter", s.fiveDCenter)
-
-                // Mode switch
                 put("flightMode", s.flightMode)
                 put("flightModeStr", s.flightModeString())
-
-                // Sticks
                 put("stickRightH", s.stickRightH)
                 put("stickRightV", s.stickRightV)
                 put("stickLeftH", s.stickLeftH)
                 put("stickLeftV", s.stickLeftV)
-
-                // Wheels
                 put("leftWheel", s.leftWheel)
                 put("rightWheel", s.rightWheel)
                 put("rightWheelDelta", s.rightWheelDelta)
             }
 
-            // Send to Flutter via EventChannel (must be on main thread)
             eventSink?.let { sink ->
                 android.os.Handler(android.os.Looper.getMainLooper()).post {
                     sink.success(stateMap)
                 }
             }
 
-            // Output to logcat for Python/ADB capture
-            // Format: key:value pairs separated by |
             val logLine = buildString {
                 append("P:${b(s.pause)}")
                 append("|GH:${b(s.gohome)}")
@@ -150,7 +161,6 @@ class RcMonitorPlugin(
                 append("|RWD:${s.rightWheelDelta}")
             }
 
-            // Only log if state changed (reduces logcat spam)
             if (logLine != lastLogLine) {
                 lastLogLine = logLine
                 Log.d(LOG_TAG, logLine)
@@ -159,8 +169,6 @@ class RcMonitorPlugin(
 
         private fun b(v: Boolean): Int = if (v) 1 else 0
     }
-
-    // --- MethodChannel handler ---
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
@@ -178,11 +186,17 @@ class RcMonitorPlugin(
             "isRunning" -> {
                 result.success(mapOf("running" to isRunning))
             }
+            "status" -> {
+                val statusList = readerChain?.status() ?: emptyList()
+                result.success(mapOf(
+                    "running" to isRunning,
+                    "activeReader" to (readerChain?.active?.name ?: "none"),
+                    "readers" to statusList
+                ))
+            }
             else -> result.notImplemented()
         }
     }
-
-    // --- EventChannel handler ---
 
     override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
         eventSink = events
@@ -194,76 +208,99 @@ class RcMonitorPlugin(
         Log.d(TAG, "Flutter event listener detached")
     }
 
-    // --- RC monitoring lifecycle ---
-
     private fun startMonitoring(result: MethodChannel.Result) {
         Log.d(TAG, "Starting RC monitoring...")
 
-        val reader = UsbRcReader(context)
-        val device = reader.findDjiDevice()
-        if (device == null) {
-            Log.e(TAG, "No DJI USB device found. Is the RC connected?")
-            result.error("NO_DEVICE", "No DJI USB device found", null)
-            return
-        }
-
-        Log.d(TAG, "Found DJI device: ${device.deviceName} (VID=${device.vendorId}, PID=0x${device.productId.toString(16)})")
-
+        // Find a DJI USB device to check permission
         val usbManager = context.getSystemService(Context.USB_SERVICE) as? UsbManager
         if (usbManager == null) {
             result.error("NO_USB_MANAGER", "USB manager unavailable", null)
             return
         }
 
-        if (!usbManager.hasPermission(device)) {
-            Log.d(TAG, "Requesting USB permission...")
+        val djiDevice = findDjiDevice(usbManager)
+        if (djiDevice == null) {
+            Log.w(TAG, "No DJI USB device found, will try non-USB readers")
+            // Still try — InputEventReader doesn't need USB
+            val started = doStartReaderChain()
+            if (started) {
+                result.success(mapOf("status" to "started"))
+            } else {
+                result.error("NO_DEVICE", "No DJI USB device and no other readers available", null)
+            }
+            return
+        }
+
+        Log.d(TAG, "Found DJI device: ${djiDevice.deviceName} PID=0x${djiDevice.productId.toString(16)}")
+
+        if (!usbManager.hasPermission(djiDevice)) {
+            Log.d(TAG, "Requesting USB permission — please tap Allow on the device")
             pendingResult = result
             val permissionIntent = PendingIntent.getBroadcast(
                 context, 0,
                 Intent(ACTION_USB_PERMISSION),
                 PendingIntent.FLAG_IMMUTABLE
             )
-            usbManager.requestPermission(device, permissionIntent)
-            // Result will be delivered via usbPermissionReceiver
+            usbManager.requestPermission(djiDevice, permissionIntent)
             return
         }
 
-        // Already have permission — start immediately
-        val started = doStartReader()
+        val started = doStartReaderChain()
         if (started) {
             result.success(mapOf("status" to "started"))
         } else {
-            result.error("START_FAILED", "Failed to start USB RC reader", null)
+            result.error("START_FAILED", "Failed to start RC reader", null)
         }
     }
 
-    private fun doStartReader(): Boolean {
-        // Clean up any previous reader first
-        usbReader?.let {
-            Log.d(TAG, "Cleaning up previous reader before starting new one")
-            it.stop()
-        }
-        usbReader = null
+    private fun doStartReaderChain(): Boolean {
+        readerChain?.stop()
+        readerChain = null
         isRunning = false
 
-        val reader = UsbRcReader(context)
-        val success = reader.start(rcListener)
-        if (success) {
-            usbReader = reader
+        val chain = RcReaderChain(
+            GamepadRcReader(context),    // Priority 1: /dev/input direct read (no root on RM510B)
+            BinderRcReader(context),     // Priority 2: DJI protocol Binder IPC (needs platform sign)
+            DussStreamReader(context),   // Priority 3: DUSS stream (no root, no handshake)
+            UsbRcReader(context),        // Priority 4: Full USB CDC ACM + DUML
+            InputEventReader(context)    // Priority 5: /dev/input sticks only (needs root)
+        )
+
+        val active = chain.start(rcListener)
+        if (active != null) {
+            readerChain = chain
             isRunning = true
-            Log.d(TAG, "RC monitoring started successfully")
-        } else {
-            Log.e(TAG, "Failed to start USB reader")
+            Log.i(TAG, "RC monitoring started via ${active.name} reader")
+            return true
         }
-        return success
+
+        Log.e(TAG, "No reader could start. Chain status:")
+        for (status in chain.status()) {
+            Log.e(TAG, "  ${status["name"]}: available=${status["available"]}")
+        }
+        return false
     }
 
     private fun stopMonitoring() {
         Log.d(TAG, "Stopping RC monitoring...")
-        usbReader?.stop()
-        usbReader = null
+        readerChain?.stop()
+        readerChain = null
         isRunning = false
         lastLogLine = ""
         Log.d(TAG, "RC monitoring stopped")
+    }
+
+    private fun findDjiDevice(usbManager: UsbManager): UsbDevice? {
+        var fallback: UsbDevice? = null
+        for (device in usbManager.deviceList.values) {
+            if (device.vendorId == RcMonitor.DJI_USB_VID) {
+                val pid = device.productId
+                if (pid == RcMonitor.DJI_USB_PID_INTERNAL) return device
+                if (pid == RcMonitor.DJI_USB_PID_ACTIVE || pid == RcMonitor.DJI_USB_PID_INIT) {
+                    fallback = device
+                }
+            }
+        }
+        return fallback
     }
 }
